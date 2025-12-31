@@ -9,12 +9,17 @@ import urllib.request
 import zipfile
 from os.path import expanduser
 from typing import Any, Iterable, List, Optional
+from datasets import load_dataset
+
 
 from torch.utils.model_zoo import tqdm
 
 
 def stream_url(
-    url: str, start_byte: Optional[int] = None, block_size: int = 32 * 1024, progress_bar: bool = True
+    url: str,
+    start_byte: Optional[int] = None,
+    block_size: int = 32 * 1024,
+    progress_bar: bool = True,
 ) -> Iterable:
     """Stream url by chunk
 
@@ -36,13 +41,16 @@ def stream_url(
     if start_byte:
         req.headers["Range"] = "bytes={}-".format(start_byte)
 
-    with urllib.request.urlopen(req) as upointer, tqdm(
-        unit="B",
-        unit_scale=True,
-        unit_divisor=1024,
-        total=url_size,
-        disable=not progress_bar,
-    ) as pbar:
+    with (
+        urllib.request.urlopen(req) as upointer,
+        tqdm(
+            unit="B",
+            unit_scale=True,
+            unit_divisor=1024,
+            total=url_size,
+            disable=not progress_bar,
+        ) as pbar,
+    ):
         num_bytes = 0
         while True:
             chunk = upointer.read(block_size)
@@ -86,7 +94,9 @@ def download_url(
         local_size: Optional[int] = os.path.getsize(filepath)
 
     elif not resume and os.path.exists(filepath):
-        raise RuntimeError("{} already exists. Delete the file manually and retry.".format(filepath))
+        raise RuntimeError(
+            "{} already exists. Delete the file manually and retry.".format(filepath)
+        )
     else:
         mode = "wb"
         local_size = None
@@ -95,7 +105,11 @@ def download_url(
         with open(filepath, "rb") as file_obj:
             if validate_file(file_obj, hash_value, hash_type):
                 return
-        raise RuntimeError("The hash of {} does not match. Delete the file manually and retry.".format(filepath))
+        raise RuntimeError(
+            "The hash of {} does not match. Delete the file manually and retry.".format(
+                filepath
+            )
+        )
 
     with open(filepath, mode) as fpointer:
         for chunk in stream_url(url, start_byte=local_size, progress_bar=progress_bar):
@@ -103,7 +117,11 @@ def download_url(
 
     with open(filepath, "rb") as file_obj:
         if hash_value and not validate_file(file_obj, hash_value, hash_type):
-            raise RuntimeError("The hash of {} does not match. Delete the file manually and retry.".format(filepath))
+            raise RuntimeError(
+                "The hash of {} does not match. Delete the file manually and retry.".format(
+                    filepath
+                )
+            )
 
 
 def validate_file(file_obj: Any, hash_value: str, hash_type: str = "sha256") -> bool:
@@ -135,7 +153,9 @@ def validate_file(file_obj: Any, hash_value: str, hash_type: str = "sha256") -> 
     return hash_func.hexdigest() == hash_value
 
 
-def extract_archive(from_path: str, to_path: Optional[str] = None, overwrite: bool = False) -> List[str]:
+def extract_archive(
+    from_path: str, to_path: Optional[str] = None, overwrite: bool = False
+) -> List[str]:
     """Extract archive.
     Args:
         from_path (str): the path of the archive.
@@ -202,5 +222,13 @@ def download_kaggle_dataset(dataset_path: str, dataset_name: str, output_path: s
         kaggle.api.dataset_download_files(dataset_path, path=data_path, unzip=True)
     except OSError:
         print(
-            f"""[!] in order to download kaggle datasets, you need to have a kaggle api token stored in your {os.path.join(expanduser('~'), '.kaggle/kaggle.json')}"""
+            f"""[!] in order to download kaggle datasets, you need to have a kaggle api token stored in your {os.path.join(expanduser("~"), ".kaggle/kaggle.json")}"""
         )
+
+
+def download_hf_dataset(dataset_path: str, dataset_name: str, output_path: str):
+    """Download dataset from Hugging Face and save to disk."""
+    ds = load_dataset(dataset_path)
+    save_path = os.path.join(output_path, dataset_name)
+    ds.save_to_disk(save_path)
+    return save_path

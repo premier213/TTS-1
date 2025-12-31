@@ -1,126 +1,219 @@
 import os
-from typing import Optional
+import csv
+from typing import Dict, Any, List, Tuple
 
-from TTS.utils.download import download_kaggle_dataset, download_url, extract_archive
+import numpy as np
+from datasets import load_dataset
+import soundfile as sf
 
 
-def download_ljspeech(path: str):
-    """Download and extract LJSpeech dataset
+TEXT_CANDIDATE_KEYS: List[str] = [
+    "text",
+    "sentence",
+    "transcript",
+    "normalized_text",
+    "prompt",
+    "label",
+]
 
-    Args:
-        path (str): path to the directory where the dataset will be stored.
+
+def _normalize_keys(sample: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a new dict with stripped keys (HF datasets sometimes contain whitespace)."""
+    return {str(k).strip(): v for k, v in sample.items()}
+
+
+def _pick_text_key(
+    sample: Dict[str, Any], candidates: List[str] = TEXT_CANDIDATE_KEYS
+) -> str:
+    """Choose the first candidate key present in sample that contains a string."""
+    sample = _normalize_keys(sample)
+    for key in candidates:
+        v = sample.get(key)
+        if isinstance(v, str) and v.strip():
+            return key
+    raise KeyError(
+        f"No usable text field found. Available keys: {list(sample.keys())}. "
+        f"Tried: {candidates}"
+    )
+
+
+def _to_int16_audio(audio_array: np.ndarray) -> np.ndarray:
     """
-    os.makedirs(path, exist_ok=True)
-    url = "https://data.keithito.com/data/speech/LJSpeech-1.1.tar.bz2"
-    download_url(url, path)
-    basename = os.path.basename(url)
-    archive = os.path.join(path, basename)
-    print(" > Extracting archive file...")
-    extract_archive(archive)
-
-
-def download_vctk(path: str, use_kaggle: Optional[bool] = False):
-    """Download and extract VCTK dataset.
-
-    Args:
-        path (str): path to the directory where the dataset will be stored.
-
-        use_kaggle (bool, optional): Downloads vctk dataset from kaggle. Is generally faster. Defaults to False.
+    Convert audio to int16 PCM, clipping floats to [-1, 1] first.
+    Returns shape (frames, channels) for soundfile compatibility.
     """
-    if use_kaggle:
-        download_kaggle_dataset("mfekadu/english-multispeaker-corpus-for-voice-cloning", "VCTK", path)
+    x = np.asarray(audio_array)
+
+    # Guard against empty/bad audio
+    if x.ndim == 0 or x.size == 0:
+        raise ValueError("Empty audio array")
+
+    # Ensure shape (frames, channels)
+    # HF audio commonly returns mono as (frames,), stereo as (frames, channels)
+    if x.ndim == 1:
+        x = x[:, None]
+    elif x.ndim == 2:
+        pass
     else:
-        os.makedirs(path, exist_ok=True)
-        url = "https://datashare.ed.ac.uk/bitstream/handle/10283/3443/VCTK-Corpus-0.92.zip"
-        download_url(url, path)
-        basename = os.path.basename(url)
-        archive = os.path.join(path, basename)
-        print(" > Extracting archive file...")
-        extract_archive(archive)
+        # Sometimes weird shapes show up; try flattening to mono safely
+        x = x.reshape(-1, 1)
+
+    # Convert dtype
+    if np.issubdtype(x.dtype, np.floating):
+        x = np.clip(x, -1.0, 1.0)
+        x = (x * 32767.0).round().astype(np.int16)
+    elif x.dtype != np.int16:
+        # If it's int32/int64/etc, clip to int16 range
+        x = np.clip(x, np.iinfo(np.int16).min, np.iinfo(np.int16).max).astype(np.int16)
+
+    return x
 
 
-def download_tweb(path: str):
-    """Download and extract Tweb dataset
-
-    Args:
-        path (str): Path to the directory where the dataset will be stored.
+def download_HAL_9000_Speech(dataset_root: str) -> None:
     """
-    download_kaggle_dataset("bryanpark/the-world-english-bible-speech-dataset", "TWEB", path)
+    Download 'campwill/HAL-9000-Speech' from Hugging Face and write it in a TTS-friendly layout:
 
+      dataset_root/
+        metadata.csv          (wavs/xxxxx.wav|text|speaker)
+        wavs/
+          00000.wav
+          00001.wav
+          ...
 
-def download_libri_tts(path: str, subset: Optional[str] = "all"):
-    """Download and extract libri tts dataset.
-
-    Args:
-        path (str): Path to the directory where the dataset will be stored.
-
-        subset (str, optional): Name of the subset to download. If you only want to download a certain
-        portion specify it here. Defaults to 'all'.
+    Supports HF Datasets where `audio` is a torchcodec AudioDecoder.
     """
+    import os
+    import csv
+    import numpy as np
+    import soundfile as sf
+    from datasets import load_dataset
 
-    subset_dict = {
-        "libri-tts-clean-100": "http://www.openslr.org/resources/60/train-clean-100.tar.gz",
-        "libri-tts-clean-360": "http://www.openslr.org/resources/60/train-clean-360.tar.gz",
-        "libri-tts-other-500": "http://www.openslr.org/resources/60/train-other-500.tar.gz",
-        "libri-tts-dev-clean": "http://www.openslr.org/resources/60/dev-clean.tar.gz",
-        "libri-tts-dev-other": "http://www.openslr.org/resources/60/dev-other.tar.gz",
-        "libri-tts-test-clean": "http://www.openslr.org/resources/60/test-clean.tar.gz",
-        "libri-tts-test-other": "http://www.openslr.org/resources/60/test-other.tar.gz",
-    }
+    TEXT_CANDIDATES = [
+        "text",
+        "sentence",
+        "transcript",
+        "normalized_text",
+        "prompt",
+        "label",
+    ]
 
-    os.makedirs(path, exist_ok=True)
-    if subset == "all":
-        for sub, val in subset_dict.items():
-            print(f" > Downloading {sub}...")
-            download_url(val, path)
-            basename = os.path.basename(val)
-            archive = os.path.join(path, basename)
-            print(" > Extracting archive file...")
-            extract_archive(archive)
-        print(" > All subsets downloaded")
-    else:
-        url = subset_dict[subset]
-        download_url(url, path)
-        basename = os.path.basename(url)
-        archive = os.path.join(path, basename)
-        print(" > Extracting archive file...")
-        extract_archive(archive)
+    def normalize_keys(sample: dict) -> dict:
+        return {str(k).strip(): v for k, v in sample.items()}
 
+    def find_text_key(sample: dict) -> str:
+        sample = normalize_keys(sample)
+        for k in TEXT_CANDIDATES:
+            v = sample.get(k)
+            if isinstance(v, str) and v.strip():
+                return k
+        raise KeyError(
+            f"No usable text field found. Keys={list(sample.keys())}, tried={TEXT_CANDIDATES}"
+        )
 
-def download_thorsten_de(path: str):
-    """Download and extract Thorsten german male voice dataset.
+    ds = load_dataset("campwill/HAL-9000-Speech")
 
-    Args:
-        path (str): Path to the directory where the dataset will be stored.
-    """
-    os.makedirs(path, exist_ok=True)
-    url = "https://www.openslr.org/resources/95/thorsten-de_v02.tgz"
-    download_url(url, path)
-    basename = os.path.basename(url)
-    archive = os.path.join(path, basename)
-    print(" > Extracting archive file...")
-    extract_archive(archive)
+    os.makedirs(dataset_root, exist_ok=True)
+    wav_dir = os.path.join(dataset_root, "wavs")
+    os.makedirs(wav_dir, exist_ok=True)
+    meta_path = os.path.join(dataset_root, "metadata.csv")
 
+    first = normalize_keys(ds["train"][0])
+    text_key = find_text_key(first)
+    print("Using text key:", text_key)
+    print("Train columns:", ds["train"].column_names)
 
-def download_mailabs(path: str, language: str = "english"):
-    """Download and extract Mailabs dataset.
+    written = 0
+    skipped = 0
+    reasons = {}
 
-    Args:
-        path (str): Path to the directory where the dataset will be stored.
+    def _skip(reason: str):
+        nonlocal skipped
+        skipped += 1
+        reasons[reason] = reasons.get(reason, 0) + 1
 
-        language (str): Language subset to download. Defaults to english.
-    """
-    language_dict = {
-        "english": "https://data.solak.de/data/Training/stt_tts/en_US.tgz",
-        "german": "https://data.solak.de/data/Training/stt_tts/de_DE.tgz",
-        "french": "https://data.solak.de/data/Training/stt_tts/fr_FR.tgz",
-        "italian": "https://data.solak.de/data/Training/stt_tts/it_IT.tgz",
-        "spanish": "https://data.solak.de/data/Training/stt_tts/es_ES.tgz",
-    }
-    os.makedirs(path, exist_ok=True)
-    url = language_dict[language]
-    download_url(url, path)
-    basename = os.path.basename(url)
-    archive = os.path.join(path, basename)
-    print(" > Extracting archive file...")
-    extract_archive(archive)
+    with open(meta_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f, delimiter="|")
+
+        for i, sample in enumerate(ds["train"]):
+            sample = normalize_keys(sample)
+
+            text_val = sample.get(text_key, "")
+            audio_obj = sample.get("audio")
+
+            if not isinstance(text_val, str) or not text_val.strip():
+                _skip("missing_text")
+                continue
+            if audio_obj is None:
+                _skip("missing_audio")
+                continue
+
+            text = text_val.strip().replace("\n", " ")
+
+            # --- Decode audio ---
+            try:
+                # HF Datasets v4 torchcodec AudioDecoder
+                if hasattr(audio_obj, "get_all_samples"):
+                    decoded = audio_obj.get_all_samples()
+                    sr = int(decoded.sample_rate)
+                    x = decoded.data  # often torch.Tensor (channels, time)
+                    if hasattr(x, "cpu"):
+                        x = x.cpu().numpy()
+                    else:
+                        x = np.asarray(x)
+
+                # Older HF format: dict with array + sampling_rate
+                elif (
+                    isinstance(audio_obj, dict)
+                    and "array" in audio_obj
+                    and "sampling_rate" in audio_obj
+                ):
+                    sr = int(audio_obj["sampling_rate"])
+                    x = np.asarray(audio_obj["array"])
+
+                else:
+                    _skip("unknown_audio_type")
+                    continue
+            except Exception:
+                _skip("decode_failed")
+                continue
+
+            if x.ndim == 0 or x.size == 0:
+                _skip("empty_audio")
+                continue
+
+            # Shape for soundfile: (time, channels)
+            # torchcodec often gives (channels, time)
+            if x.ndim == 2:
+                if x.shape[0] in (1, 2) and x.shape[1] > x.shape[0]:
+                    x = x.T
+            elif x.ndim == 1:
+                x = x[:, None]
+            else:
+                x = x.reshape(-1, 1)
+
+            # Convert to int16 PCM
+            if np.issubdtype(x.dtype, np.floating):
+                x = np.clip(x, -1.0, 1.0)
+                x = (x * 32767.0).round().astype(np.int16)
+            elif x.dtype != np.int16:
+                x = np.clip(x, np.iinfo(np.int16).min, np.iinfo(np.int16).max).astype(
+                    np.int16
+                )
+
+            filename = f"{i:05d}.wav"
+            wav_path = os.path.join(wav_dir, filename)
+
+            try:
+                sf.write(wav_path, x, sr, subtype="PCM_16")
+            except Exception:
+                _skip("write_failed")
+                continue
+
+            writer.writerow([f"wavs/{filename}", text, "none"])
+            written += 1
+
+    print(f"HAL-9000-Speech: wrote {written} samples, skipped {skipped}")
+    if skipped:
+        print("Skip reasons:", reasons)
+    print(f"Dataset root: {dataset_root}")
+    print(f"Metadata: {meta_path}")
